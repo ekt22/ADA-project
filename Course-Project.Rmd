@@ -1,0 +1,173 @@
+---
+title: "Covid-19. The Impact of Time from Disease Onset to Testing on Disease Outcomes"
+author: "Tetteh, Emmanuel"
+date: "12/1/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+## install and load library packages 
+```{r}
+pacman::p_load(survival, survminer, tidyverse, readr, lmtest, table1)
+library(dplyr)
+library(lubridate)
+library(knitr)
+library(kableExtra)
+library(nnet)
+library(odds.n.ends)
+```
+
+## import data and remove missing values/ fields
+```{r}
+CDC <- read.csv("COVID-19_Case_Surveillance_Public_Use_Data.csv", na.strings = c("", " ", "Unknown", "Missing", "NA"))
+CDC <- CDC %>% na.omit()
+```
+
+## Data Cleaning and Management
+```{r}
+## change date variables from character to date format using lubridate package
+CDC$pos_spec_dt <- ymd(CDC$pos_spec_dt) #positive specimen collection date
+CDC$onset_dt <- ymd(CDC$onset_dt) #date of symptom onset
+
+
+## calculate wait-time variable from positive specimen collection date and symptom onset date
+CDC$wait_time <- as.numeric(CDC$pos_spec_dt - CDC$onset_dt)
+
+## recode age variable into four age groups
+CDC$age_cat <- case_when(CDC$age_group == "0 - 9 Years" | CDC$age_group == "10 - 19 Years" ~ "0 -19 yrs",
+                           CDC$age_group == "20 - 29 Years" | CDC$age_group == "30 - 39 Years" ~ "20 -39 yrs",
+                           CDC$age_group == "40 - 49 Years" | CDC$age_group == "50 - 59 Years" | CDC$age_group == "60 - 69 Years" ~ "40 -69 yrs",
+                           CDC$age_group == "70 - 79 Years" | CDC$age_group == "80+ Years " ~ "70 + yrs"
+                           )
+
+## Complete case analysis exclusions of missing/refused data
+CDC_complete <- CDC %>%
+  select("age_cat", "sex", "medcond_yn", "icu_yn", "death_yn", "wait_time", "hosp_yn", "Race.and.ethnicity..combined." ) %>%
+  na.omit() %>% #omitting NA's in the data set
+  filter(sex!="Other", Race.and.ethnicity..combined.!="Unknown/Missing", death_yn!="Unknown/Missing", wait_time!="Unknown/Missing", medcond_yn!="Unknown/Missing") #drop those refused to report sex and agecat
+
+## recode sex as factor variable
+CDC_complete$Sex <- case_when(CDC_complete$sex == "Female" ~ "Female",
+                       CDC_complete$sex == "Male" ~ "Male")
+
+## rename variable to have full names
+CDC_complete <- CDC_complete %>% rename("Age Category" = age_cat, "Race" = "Race.and.ethnicity..combined.",
+                            "Med Condition" = medcond_yn, "ICU Admission" = icu_yn,
+                            "Death Status" = death_yn, "Hospitalization" = hosp_yn, "Wait Time" = wait_time)
+
+## change variable types to factor variable for analyses
+all_var <- c("Sex", "Age Category", "Race", "Med Condition", "ICU Admission", "Death Status", "Hospitalization") 
+CDC_complete <- CDC_complete %>% mutate_at(all_var, as.factor)
+
+```
+## linearity test for wait time
+```{r}
+#for Death Status and wait time
+CDC_complete <- CDC_complete %>%
+  mutate(WaitTime.times.logwaittime = `Wait Time` * log(`Wait Time`)) #create term to test linearity
+
+boxTidwellWT <- glm(`Death Status` ~ `Wait Time` + WaitTime.times.logwaittime, data=CDC_complete, family="binomial") #Box Tidwell technique, test the assumption of linearity
+
+summary(boxTidwellWT)
+
+
+#for ICU Admission and wait time
+CDC_complete <- CDC_complete %>%
+  mutate(WaitTime.times.logwaittime = `Wait Time` * log(`Wait Time`)) #create term to test linearity
+
+boxTidwellICU <- glm(`ICU Admission` ~ `Wait Time` + WaitTime.times.logwaittime, data=CDC_complete, family="binomial") #Box Tidwell technique, test the assumption of linearity
+
+summary(boxTidwellICU)
+```
+
+## linearity assumption unmet for both outcome variables, therefore wait time variable will be reclassified into a categories
+```{r}
+# excluding negative values
+CDC_complete <- CDC_complete %>% filter(`Wait Time` >= 0)
+
+# recode wait time variable into five categories age groups
+CDC_complete <- CDC_complete %>% mutate(wait.cat = case_when(
+                         CDC_complete$`Wait Time` >= 0 & CDC_complete$`Wait Time` < 3 ~ 0,
+                         CDC_complete$`Wait Time` >= 3 & CDC_complete$`Wait Time` < 8 ~ 1,
+                         CDC_complete$`Wait Time` >= 8 & CDC_complete$`Wait Time` < 15 ~ 2,
+                         CDC_complete$`Wait Time` >= 15 ~ 3))
+
+#making wait time categories as factor variable
+CDC_complete$wait.cat <- factor(CDC_complete$wait.cat, 0:3, c("0-2 days", "3-7 days", "8-14 days", "More than 2 weeks"))
+
+table(CDC_complete$wait.cat) #check to confirm re-classification
+```
+
+
+## logistic model for outcomes using wait time variable only
+```{r}
+#model for Death Status
+DeathLogit <- glm(`Death Status` ~ wait.cat, data = CDC_complete, family = "binomial")
+summary(DeathLogit)
+
+#odds ratio and confidence intervals
+ORDeathLogit <- exp(cbind(OR = coef(DeathLogit), confint(DeathLogit)))
+ORDeathLogit
+
+
+#model for ICU Admissions
+ICULogit <- glm(`ICU Admission` ~ wait.cat, data = CDC_complete, family = "binomial")
+summary(ICULogit)
+
+#odds ratio and confidence intervals
+ORICULogit <- exp(cbind(OR = coef(ICULogit), confint(ICULogit)))
+ORICULogit
+```
+
+## multi-logistic models with age, sex, race, and pre-existing conditions as covariates
+```{r}
+#model for Death Status
+DeathMultiLogit <- glm(`Death Status` ~ wait.cat + `Sex`+ `Age Category` + relevel(Race, ref = "White, Non-Hispanic") + `Med Condition`, data = CDC_complete, family = "binomial")
+summary(DeathMultiLogit)
+
+#odds ratio and confidence interval
+ORDeathMultiLogit <- exp(cbind(OR = coef(DeathMultiLogit), confint(DeathMultiLogit)))
+ORDeathMultiLogit
+format(round(ORDeathMultiLogit, 4), nsmall = 4)
+```
+```{r}
+#model for ICU Admissions
+ICUMultiLogit <- glm(`ICU Admission` ~ wait.cat + `Sex` + `Age Category` + relevel(Race, ref = "White, Non-Hispanic") + `Med Condition`, data = CDC_complete, family = "binomial")
+summary(ICUMultiLogit)
+
+#odds ratio and confidence interval
+ORICUMultiLogit <- exp(cbind(OR = coef(ICUMultiLogit), confint(ICUMultiLogit)))
+ORICUMultiLogit
+format(round(ORICUMultiLogit, 4), nsmall = 4)
+```
+
+## Creating Tables
+```{r}
+label(CDC_complete$wait.cat) <- 'Wait Time'
+label(CDC_complete$`Med Condition`) <- 'Pre-existing Med. Comdition'
+table1(~ `Age Category` + `Sex` + `Race` + wait.cat + `Med Condition` + `Hospitalization`|`Death Status`,overall="Total", CDC_complete)
+
+```
+```{r}
+label(CDC_complete$wait.cat) <- 'Wait Time'
+label(CDC_complete$`Med Condition`) <- 'Pre-existing Med. Comdition'
+table1(~ `Age Category` + `Sex` + `Race` + wait.cat + `Med Condition` + `Hospitalization`|`ICU Admission`,overall="Total", CDC_complete)
+```
+
+```{r}
+table1(~ICUMultiLogit, CDC_complete)
+```
+
+```{r}
+e1<- print(data.frame(cbind(exp(coef(DeathMultiLogit)), exp(confint(DeathMultiLogit)), summary(DeathMultiLogit)$coefficients[,4])))
+```
+
+```{r, echo = FALSE}
+knitr::kable(e1, digits = 3, col.names = c("Odds Ratio", "95% C.I (Lower Limit)", "95% C.I (Upper Limit)", "P-value"), booktabs = T) %>% kable_classic()
+
+
+```
